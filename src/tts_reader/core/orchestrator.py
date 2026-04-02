@@ -1,15 +1,4 @@
-"""全体統括・パイプライン制御
-
-テキスト解析 → 先行TTS生成 → バッファリング → 再生 の
-パイプラインを管理する。
-
-バッファリング戦略:
-  - Producer は チャンク順に TTS 生成タスクを起動する。
-  - 各タスクの結果は index 付きの dict に格納される。
-  - 投入専用コルーチンが index 順にキューへ投入する。
-  - Consumer はキューから取り出して再生する。
-  これにより、先行生成の並行性を保ちつつ順序を保証する。
-"""
+"""全体統括・パイプライン制御"""
 
 from __future__ import annotations
 
@@ -48,18 +37,12 @@ class Orchestrator:
         self._tts = tts_client or TTSClient(self._config.tts)
         self._player = audio_player or AudioPlayer()
 
-        # 再生キュー（順序保証済みのセグメントが入る）
         self._play_queue: asyncio.Queue[AudioSegment | None] = asyncio.Queue()
         self._chunks: list[TextChunk] = []
-
-        # 状態
         self._running = False
         self._current_chunk_index: int = -1
-
-        # 外部通知
         self._on_event: Callable[[PlaybackEvent], Any] | None = None
-
-        # 再生コールバック接続
+        self._speak_task: asyncio.Task[None] | None = None
         self._player.set_state_callback(self._on_playback_state)
 
     # ----- public -----------------------------------------------------------
@@ -81,8 +64,8 @@ class Orchestrator:
         """テキスト全体を読み上げる（メインエントリポイント）"""
         self._running = True
 
-        # 前回のキューをクリア
-        self._play_queue = asyncio.Queue()
+        buffer_ahead = max(1, self._config.playback.buffer_ahead)
+        self._play_queue = asyncio.Queue(maxsize=buffer_ahead)
 
         self._chunks = self._parser.parse(text)
         if not self._chunks:
@@ -102,85 +85,70 @@ class Orchestrator:
             self._running = False
 
     async def stop(self) -> None:
+        """再生を停止する。
+
+        _running を False にしてから、Producer / Consumer が
+        ブロックしている可能性のあるキューを強制的に解放する。
+        """
         self._running = False
         await self._player.stop()
-        # キューを空にする
+
+        # キューを空にする（Producer の put() がブロック中なら解放される）
         while not self._play_queue.empty():
             try:
                 self._play_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        # 終端マーカーを投入して consumer を終了させる
-        try:
-            self._play_queue.put_nowait(None)
-        except asyncio.QueueFull:
-            pass
+
+        # Consumer を終了させるために None を投入する。
+        # キューが満杯の場合はまず1つ取り出してスペースを作る。
+        for _ in range(2):
+            try:
+                self._play_queue.put_nowait(None)
+                break
+            except asyncio.QueueFull:
+                try:
+                    self._play_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
 
     # ----- pipeline stages --------------------------------------------------
 
     async def _produce(self) -> None:
-        """チャンクを順に処理し、音声を先行生成してバッファに投入する。
-
-        buffer_ahead の数だけ並行してTTS生成を行うが、
-        キューへの投入は常にチャンク順を保証する。
-        """
-        buffer_ahead = self._config.playback.buffer_ahead
-        total = len(self._chunks)
-
-        # 各チャンクの生成結果を格納する dict と完了イベント
-        results: dict[int, AudioSegment] = {}
-        events: dict[int, asyncio.Event] = {
-            i: asyncio.Event() for i in range(total)
-        }
-
-        # 同時生成数を制限するセマフォ
-        sem = asyncio.Semaphore(buffer_ahead)
-
-        async def _generate(idx: int, chunk: TextChunk) -> None:
-            """1チャンクの音声を生成し、results に格納して Event をセットする"""
-            async with sem:
+        """チャンクを順に1つずつ生成し、キューに投入する。"""
+        for chunk in self._chunks:
+            if not self._running:
+                break
+            segment = await self._synthesize_chunk(chunk)
+            if not self._running:
+                break
+            try:
+                await asyncio.wait_for(
+                    self._play_queue.put(segment),
+                    timeout=0.5,
+                )
+            except asyncio.TimeoutError:
                 if not self._running:
-                    events[idx].set()
-                    return
-                segment = await self._synthesize_chunk(chunk)
-                results[idx] = segment
-                events[idx].set()
-
-        # 全チャンクの生成タスクを起動
-        tasks: list[asyncio.Task[None]] = []
-        for i, chunk in enumerate(self._chunks):
-            if not self._running:
-                # 残りのイベントもセットして待機を解除
-                for j in range(i, total):
-                    events[j].set()
-                break
-            task = asyncio.create_task(_generate(i, chunk))
-            tasks.append(task)
-
-        # チャンク順にキューへ投入する
-        for i in range(total):
-            if not self._running:
-                break
-            await events[i].wait()
-            if i in results:
-                await self._play_queue.put(results.pop(i))
-
-        # 全タスクの完了を待つ（例外を拾うため）
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+                    break
+                # running 中のタイムアウトはリトライ
+                await self._play_queue.put(segment)
 
         # 終端マーカー
-        await self._play_queue.put(None)
+        if self._running:
+            await self._play_queue.put(None)
 
     async def _consume(self) -> None:
         """バッファから音声セグメントを取り出して順に再生する"""
         while self._running:
-            segment: AudioSegment | None = await self._play_queue.get()
+            try:
+                segment: AudioSegment | None = await asyncio.wait_for(
+                    self._play_queue.get(),
+                    timeout=1.0,
+                )
+            except asyncio.TimeoutError:
+                if not self._running:
+                    break
+                continue
             if segment is None:
                 break
             if not self._running:
@@ -200,7 +168,6 @@ class Orchestrator:
             segment.is_ready = True
             return segment
 
-        # TTSリクエスト
         request = self._tts.build_request(text=chunk.content)
         try:
             async for data in self._tts.synthesize_stream(request):

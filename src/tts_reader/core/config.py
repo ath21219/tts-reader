@@ -9,7 +9,7 @@ from typing import Optional
 @dataclass
 class TTSConfig:
     """TTS関連の設定"""
-    server_url: str = "http://localhost:8000"
+    server_url: str = "http://localhost:7820"
     endpoint: str = "/v1/audio/speech"
     voice: str = "alloy"
     model: str = "tts-1"
@@ -23,7 +23,7 @@ class TTSConfig:
 @dataclass
 class PlaybackConfig:
     """再生関連の設定"""
-    buffer_ahead: int = 2           # 先行バッファリングするチャンク数
+    buffer_ahead: int = 1           # 先行バッファリングするチャンク数
     default_pause: float = 0.3      # 文間のデフォルトポーズ（秒）
     heading_pause: float = 0.8      # 見出し前後のポーズ（秒）
     section_pause: float = 1.2      # セクション区切りのポーズ（秒）

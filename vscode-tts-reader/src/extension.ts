@@ -122,87 +122,16 @@ function getVenvPython(pythonDir: string): string {
   return config.get<string>("pythonPath", "python");
 }
 
-async function ensurePythonEnv(pythonDir: string): Promise<boolean> {
-  const venvDir = getVenvDir(pythonDir);
-
-  if (fs.existsSync(venvDir)) {
-    log("Python venv already exists.");
-    return true;
+function validatePythonEnv(pythonDir: string): boolean {
+  const venvPython = getVenvPython(pythonDir);
+  if (!fs.existsSync(venvPython)) {
+    vscode.window.showErrorMessage(
+      "TTS Reader: Python environment not found. " +
+      "Please rebuild the extension with build.ps1."
+    );
+    return false;
   }
-
-  log(`Creating Python virtual environment in ${venvDir}`);
-  const config = vscode.workspace.getConfiguration("ttsReader");
-  const systemPython = config.get<string>("pythonPath", "python");
-
-  return vscode.window.withProgress(
-    {
-      location: vscode.ProgressLocation.Notification,
-      title: "TTS Reader",
-      cancellable: false,
-    },
-    async (progress) => {
-      try {
-        // venv 作成
-        progress.report({ message: "Creating virtual environment..." });
-        await execAsync(`"${systemPython}" -m venv "${venvDir}"`);
-        log("venv created successfully.");
-
-        // pip アップグレード（オプションだが失敗を減らす）
-        progress.report({ message: "Upgrading pip..." });
-        const venvPython = getVenvPython(pythonDir);
-        await execAsync(`"${venvPython}" -m pip install --upgrade pip`);
-
-        // 依存インストール
-        progress.report({ message: "Installing dependencies..." });
-        const reqFile = path.join(pythonDir, "requirements.txt");
-
-        if (fs.existsSync(reqFile)) {
-          await execAsync(`"${venvPython}" -m pip install -r "${reqFile}"`);
-        }
-
-        // tts_reader パッケージ自体をインストール
-        progress.report({ message: "Installing tts-reader..." });
-        const pyprojectFile = path.join(pythonDir, "pyproject.toml");
-        if (fs.existsSync(pyprojectFile)) {
-          await execAsync(`"${venvPython}" -m pip install -e "${pythonDir}"`);
-        }
-
-        log("Python environment setup complete.");
-        vscode.window.showInformationMessage(
-          "TTS Reader: Python environment ready."
-        );
-        return true;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        log(`Python environment setup failed: ${msg}`);
-
-        // venv が中途半端に作られた場合は削除
-        if (fs.existsSync(venvDir)) {
-          try {
-            fs.rmSync(venvDir, { recursive: true, force: true });
-            log("Cleaned up partial venv.");
-          } catch {
-            log("Failed to clean up partial venv.");
-          }
-        }
-
-        vscode.window.showErrorMessage(
-          "TTS Reader: Failed to set up Python environment. " +
-          "Check Output panel (TTS Reader) for details."
-        );
-        return false;
-      }
-    }
-  );
-}
-
-function getPip(pythonDir: string): string {
-  const venvDir = getVenvDir(pythonDir);
-  const winPip = path.join(venvDir, "Scripts", "pip.exe");
-  if (fs.existsSync(winPip)) {
-    return winPip;
-  }
-  return path.join(venvDir, "bin", "pip");
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -221,16 +150,11 @@ async function startPipeline(
     return;
   }
 
-  // Python 環境のセットアップ
-  const envReady = await ensurePythonEnv(pythonDir);
-  if (!envReady) {
+  if (!validatePythonEnv(pythonDir)) {
     return;
   }
 
-  // ブリッジサーバ起動
   await startBridgeServer(pythonDir);
-
-  // クライアント接続
   await connectClient();
 }
 

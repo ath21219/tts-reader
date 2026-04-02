@@ -57,7 +57,19 @@ async def bridge_server(bridge_app_config: AppConfig) -> AsyncIterator[BridgeSer
 
     yield server
 
-    await server.stop()
+    # クリーンアップ: orchestrator を安全に停止
+    orch._running = False
+    try:
+        await asyncio.wait_for(orch.shutdown(), timeout=2.0)
+    except (asyncio.TimeoutError, Exception):
+        pass
+
+    if server._server:
+        server._server.close()
+        try:
+            await asyncio.wait_for(server._server.wait_closed(), timeout=2.0)
+        except asyncio.TimeoutError:
+            pass
 
 
 def _ws_url(server: BridgeServer) -> str:
@@ -75,7 +87,6 @@ class TestBridgeServer:
         self, bridge_server: BridgeServer,
     ) -> None:
         async with connect(_ws_url(bridge_server)) as ws:
-            # 接続確認: ping が成功すれば接続中
             pong = await ws.ping()
             await pong
 
@@ -89,7 +100,8 @@ class TestBridgeServer:
             }))
             events: list[dict[str, Any]] = []
             try:
-                async for raw in ws:
+                while True:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
                     msg = json.loads(raw)
                     events.append(msg)
                     if msg.get("event") == "done":
@@ -117,13 +129,36 @@ class TestBridgeServer:
         self, bridge_server: BridgeServer,
     ) -> None:
         async with connect(_ws_url(bridge_server)) as ws:
+            # 長いテキストの読み上げを開始
             await ws.send(json.dumps({
                 "method": "speak",
                 "params": {"text": "長いテキスト。" * 10},
             }))
-            await asyncio.sleep(0.1)
+
+            # 少し待ってイベントが来始めるのを確認
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                msg = json.loads(raw)
+                # 最初のイベントが来た（playback or done）
+            except asyncio.TimeoutError:
+                pass
+
+            # 停止コマンド送信
             await ws.send(json.dumps({"method": "stop"}))
-            # 接続確認: stopの後もpingが通ること
+
+            # stop 後もエラーなく通信が続くことを確認
+            # （done が来るか、あるいは何も来ないかのどちらか）
+            try:
+                while True:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                    msg = json.loads(raw)
+                    if msg.get("event") in ("done", "error"):
+                        break
+            except asyncio.TimeoutError:
+                # タイムアウトは正常（stop により再生が終了した）
+                pass
+
+            # 接続がまだ生きていることを確認
             pong = await ws.ping()
             await pong
 

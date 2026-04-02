@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -37,7 +38,7 @@ def tts_config() -> TTSConfig:
 @pytest.fixture
 def playback_config() -> PlaybackConfig:
     return PlaybackConfig(
-        buffer_ahead=2,
+        buffer_ahead=1,
         default_pause=0.1,
         heading_pause=0.2,
         section_pause=0.3,
@@ -118,33 +119,34 @@ def mock_tts_client(tts_config: TTSConfig) -> MockTTSClient:
 # ---------------------------------------------------------------------------
 
 class MockAudioBackend:
-    """pygame.mixer の代替モックバックエンド"""
+    """音声バックエンドのモック
+
+    _MiniaudioBackend と同じインターフェースを持つ。
+    play() → wait_until_done() の呼び出しパターンに対応する。
+    """
 
     def __init__(self) -> None:
         self.played: list[bytes] = []
-        self._busy = False
-        self._busy_counter = 0
+        self._done_event = threading.Event()
+        self._done_event.set()
 
     def ensure_init(self) -> None:
         pass
 
     def play(self, audio_data: bytes, fmt: str = "mp3") -> None:
         self.played.append(audio_data)
-        self._busy = True
-        self._busy_counter = 2
+        self._done_event.clear()
+        # モックなので即座に「再生完了」とする
+        self._done_event.set()
 
-    def is_busy(self) -> bool:
-        if self._busy:
-            self._busy_counter -= 1
-            if self._busy_counter <= 0:
-                self._busy = False
-        return self._busy
+    def wait_until_done(self) -> None:
+        self._done_event.wait(timeout=5.0)
 
     def stop(self) -> None:
-        self._busy = False
+        self._done_event.set()
 
     def quit(self) -> None:
-        pass
+        self._done_event.set()
 
 
 @pytest.fixture
