@@ -1,50 +1,107 @@
-"""音声再生・再生状態管理"""
+"""音声再生・再生状態管理
+
+miniaudio をバックエンドとして使用。
+pygame の代替として、Python 3.14+ / Windows でも
+ビルド不要で動作する。
+"""
 
 from __future__ import annotations
 
 import asyncio
 import io
+import threading
 from collections.abc import Callable
 from typing import Any
 
 from tts_reader.core.models import AudioSegment, PlaybackState, TextChunk
 
 
-class _PygameBackend:
+# ---------------------------------------------------------------------------
+# miniaudio バックエンド
+# ---------------------------------------------------------------------------
+
+class _MiniaudioBackend:
+    """miniaudio を使った再生バックエンド"""
+
     def __init__(self) -> None:
-        self._initialized = False
+        self._device: Any | None = None
+        self._playing = False
+        self._lock = threading.Lock()
 
     def ensure_init(self) -> None:
-        if not self._initialized:
-            import pygame
-            pygame.mixer.init()
-            self._initialized = True
+        pass  # miniaudio は PlaybackDevice 生成時に初期化される
 
     def play(self, audio_data: bytes, fmt: str = "mp3") -> None:
-        import pygame
-        self.ensure_init()
-        sound = pygame.mixer.Sound(io.BytesIO(audio_data))
-        sound.play()
-        self._current_sound = sound
+        import miniaudio
+
+        # 音声データをデコード
+        decoded = miniaudio.decode(audio_data, nchannels=1, sample_rate=44100)
+
+        # PCMデータからストリームを作成
+        stream = miniaudio.stream_raw_pcm_memory(
+            decoded.samples,
+            decoded.nchannels,
+            miniaudio.width_from_format(decoded.sample_format),
+        )
+
+        # 再生完了を検知するためのラッパージェネレータ
+        def monitored_stream() -> Any:
+            required_frames = yield b""
+            try:
+                while True:
+                    required_frames = yield stream.send(required_frames)
+            except StopIteration:
+                pass
+            finally:
+                with self._lock:
+                    self._playing = False
+
+        gen = monitored_stream()
+        next(gen)  # ジェネレータ初期化
+
+        with self._lock:
+            # 前のデバイスがあれば閉じる
+            if self._device is not None:
+                try:
+                    self._device.close()
+                except Exception:
+                    pass
+
+            self._playing = True
+            self._device = miniaudio.PlaybackDevice(
+                output_format=decoded.sample_format,
+                nchannels=decoded.nchannels,
+                sample_rate=decoded.sample_rate,
+            )
+            self._device.start(gen)
 
     def is_busy(self) -> bool:
-        import pygame
-        return pygame.mixer.get_busy()
+        with self._lock:
+            return self._playing
 
     def stop(self) -> None:
-        import pygame
-        pygame.mixer.stop()
+        with self._lock:
+            self._playing = False
+            if self._device is not None:
+                try:
+                    self._device.close()
+                except Exception:
+                    pass
+                self._device = None
 
     def quit(self) -> None:
-        import pygame
-        if self._initialized:
-            pygame.mixer.quit()
-            self._initialized = False
+        self.stop()
 
+
+# ---------------------------------------------------------------------------
+# AudioPlayer（バックエンド差し替え可能）
+# ---------------------------------------------------------------------------
 
 class AudioPlayer:
+    """非同期対応の音声プレイヤー"""
+
     def __init__(self, backend: Any | None = None) -> None:
-        self._backend = backend or _PygameBackend()
+        self._backend = backend or _MiniaudioBackend()
         self._state = PlaybackState.IDLE
         self._lock = asyncio.Lock()
         self._on_state_change: Callable[[TextChunk, PlaybackState], Any] | None = None

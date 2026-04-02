@@ -130,14 +130,14 @@ async function ensurePythonEnv(pythonDir: string): Promise<boolean> {
     return true;
   }
 
-  log("Creating Python virtual environment...");
+  log(`Creating Python virtual environment in ${venvDir}`);
   const config = vscode.workspace.getConfiguration("ttsReader");
   const systemPython = config.get<string>("pythonPath", "python");
 
   return vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: "TTS Reader: Setting up Python environment...",
+      title: "TTS Reader",
       cancellable: false,
     },
     async (progress) => {
@@ -145,26 +145,50 @@ async function ensurePythonEnv(pythonDir: string): Promise<boolean> {
         // venv 作成
         progress.report({ message: "Creating virtual environment..." });
         await execAsync(`"${systemPython}" -m venv "${venvDir}"`);
+        log("venv created successfully.");
+
+        // pip アップグレード（オプションだが失敗を減らす）
+        progress.report({ message: "Upgrading pip..." });
+        const venvPython = getVenvPython(pythonDir);
+        await execAsync(`"${venvPython}" -m pip install --upgrade pip`);
 
         // 依存インストール
         progress.report({ message: "Installing dependencies..." });
-        const pip = getPip(pythonDir);
         const reqFile = path.join(pythonDir, "requirements.txt");
 
         if (fs.existsSync(reqFile)) {
-          await execAsync(`"${pip}" install -r "${reqFile}"`);
-        } else {
-          // requirements.txt がない場合は pyproject.toml から
-          await execAsync(`"${pip}" install -e "${pythonDir}"`);
+          await execAsync(`"${venvPython}" -m pip install -r "${reqFile}"`);
+        }
+
+        // tts_reader パッケージ自体をインストール
+        progress.report({ message: "Installing tts-reader..." });
+        const pyprojectFile = path.join(pythonDir, "pyproject.toml");
+        if (fs.existsSync(pyprojectFile)) {
+          await execAsync(`"${venvPython}" -m pip install -e "${pythonDir}"`);
         }
 
         log("Python environment setup complete.");
+        vscode.window.showInformationMessage(
+          "TTS Reader: Python environment ready."
+        );
         return true;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log(`Python environment setup failed: ${msg}`);
+
+        // venv が中途半端に作られた場合は削除
+        if (fs.existsSync(venvDir)) {
+          try {
+            fs.rmSync(venvDir, { recursive: true, force: true });
+            log("Cleaned up partial venv.");
+          } catch {
+            log("Failed to clean up partial venv.");
+          }
+        }
+
         vscode.window.showErrorMessage(
-          `TTS Reader: Failed to set up Python environment. ${msg}`
+          "TTS Reader: Failed to set up Python environment. " +
+          "Check Output panel (TTS Reader) for details."
         );
         return false;
       }
@@ -313,20 +337,25 @@ async function waitForServer(
 
 function isPortInUse(host: string, port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = new net.Socket();
-    socket.setTimeout(500);
-    socket.on("connect", () => {
-      socket.destroy();
+    // WebSocket サーバに対して生TCP接続するとハンドシェイクエラーが出るため、
+    // 短命なWebSocket接続で確認する
+    const testWs = new (require("ws") as typeof import("ws"))(
+      `ws://${host}:${port}`
+    );
+    const timer = setTimeout(() => {
+      testWs.terminate();
+      resolve(false);
+    }, 1000);
+
+    testWs.on("open", () => {
+      clearTimeout(timer);
+      testWs.close();
       resolve(true);
     });
-    socket.on("timeout", () => {
-      socket.destroy();
+    testWs.on("error", () => {
+      clearTimeout(timer);
       resolve(false);
     });
-    socket.on("error", () => {
-      resolve(false);
-    });
-    socket.connect(port, host);
   });
 }
 
@@ -694,14 +723,25 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function execAsync(command: string): Promise<string> {
+function execAsync(command: string, cwd?: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    cp.exec(command, { timeout: 120000 }, (err, stdout, stderr) => {
-      if (err) {
-        reject(new Error(`${err.message}\n${stderr}`));
-      } else {
-        resolve(stdout);
+    log(`Executing: ${command}`);
+    cp.exec(
+      command,
+      { timeout: 120000, cwd, encoding: "utf8" },
+      (err, stdout, stderr) => {
+        if (stdout) {
+          log(`[exec:out] ${stdout.trim()}`);
+        }
+        if (stderr) {
+          log(`[exec:err] ${stderr.trim()}`);
+        }
+        if (err) {
+          reject(new Error(`${err.message}\nstdout: ${stdout}\nstderr: ${stderr}`));
+        } else {
+          resolve(stdout);
+        }
       }
-    });
+    );
   });
 }

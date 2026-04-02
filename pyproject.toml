@@ -9,7 +9,7 @@ description = "Modular TTS reader engine with streaming playback"
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.9",
-    "pygame>=2.5",
+    "miniaudio>=1.60",
     "websockets>=13.0",
 ]
 

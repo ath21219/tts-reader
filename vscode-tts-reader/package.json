@@ -80,11 +80,8 @@
           "description": "Seed for reproducible TTS generation"
         },
         "ttsReader.voice": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null,
+          "type": "string",
+          "default": "alloy",
           "description": "Reference voice name for TTS"
         },
         "ttsReader.speed": {
