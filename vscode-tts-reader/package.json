@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/tts-reader"
+    "url": "https://github.com/ath21219/tts-reader"
   },
   "engines": {
     "vscode": "^1.85.0"
@@ -58,11 +58,13 @@
         },
         "ttsReader.pythonProjectPath": {
           "type": "string",
-          "default": ""
+          "default": "",
+          "description": "[for Development] Path to Python environment for Bridge server"
         },
         "ttsReader.ttsServerUrl": {
           "type": "string",
-          "default": "http://localhost:7820"
+          "default": "http://localhost:7820",
+          "description": "OpenAI-compatible TTS server url"
         },
         "ttsReader.caption": {
           "type": "string",
@@ -78,12 +80,17 @@
           "description": "Seed for reproducible TTS generation"
         },
         "ttsReader.voice": {
-          "type": "string",
-          "default": "alloy"
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Reference voice name for TTS"
         },
         "ttsReader.speed": {
           "type": "number",
-          "default": 1.0
+          "default": 1.0,
+          "description": "Speaking speed for TTS"
         },
         "ttsReader.autoStartServer": {
           "type": "boolean",
