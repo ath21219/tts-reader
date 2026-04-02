@@ -115,23 +115,23 @@ class Orchestrator:
     # ----- pipeline stages --------------------------------------------------
 
     async def _produce(self) -> None:
-        """チャンクを順に1つずつ生成し、キューに投入する。"""
+        """チャンクを順に1つずつ TTS 合成し、キューに投入する。"""
         for chunk in self._chunks:
             if not self._running:
                 break
             segment = await self._synthesize_chunk(chunk)
             if not self._running:
                 break
-            try:
-                await asyncio.wait_for(
-                    self._play_queue.put(segment),
-                    timeout=0.5,
-                )
-            except asyncio.TimeoutError:
-                if not self._running:
-                    break
-                # running 中のタイムアウトはリトライ
-                await self._play_queue.put(segment)
+
+            while self._running:
+                try:
+                    await asyncio.wait_for(
+                        self._play_queue.put(segment),
+                        timeout=0.5,
+                    )
+                    break  # 投入成功
+                except asyncio.TimeoutError:
+                    continue  # _running をチェックしてリトライ
 
         # 終端マーカー
         if self._running:

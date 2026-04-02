@@ -3,6 +3,7 @@
   "displayName": "TTS Reader",
   "description": "Read aloud text with local TTS server",
   "version": "0.1.0",
+  "publisher": "bebinca",
   "repository": {
     "type": "git",
     "url": "https://github.com/ath21219/tts-reader"

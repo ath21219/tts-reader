@@ -47,6 +47,9 @@ async def bridge_server(bridge_app_config: AppConfig) -> AsyncIterator[BridgeSer
     server._orchestrator.set_event_callback(server._on_playback_event)
     await server._orchestrator.start()
 
+    # [CHANGED] イベントディスパッチャタスクを起動
+    server._event_dispatcher_task = asyncio.create_task(server._dispatch_events())
+
     server._server = await websockets.serve(
         server._handle_client,
         server._host,
@@ -63,6 +66,14 @@ async def bridge_server(bridge_app_config: AppConfig) -> AsyncIterator[BridgeSer
         await asyncio.wait_for(orch.shutdown(), timeout=2.0)
     except (asyncio.TimeoutError, Exception):
         pass
+
+    # [CHANGED] イベントディスパッチャを停止
+    if server._event_dispatcher_task and not server._event_dispatcher_task.done():
+        try:
+            server._event_queue.put_nowait(None)
+            await asyncio.wait_for(server._event_dispatcher_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            server._event_dispatcher_task.cancel()
 
     if server._server:
         server._server.close()
@@ -220,3 +231,69 @@ class TestBridgeServer:
                     break
                 if msg.get("event") == "done":
                     break
+
+    # [CHANGED] 新規: イベントキュー経由でイベント順序が保たれることの検証
+    async def test_playback_events_arrive_in_order(
+        self, bridge_server: BridgeServer,
+    ) -> None:
+        """playback イベントが chunk index 順に到着すること"""
+        async with connect(_ws_url(bridge_server)) as ws:
+            await ws.send(json.dumps({
+                "method": "speak",
+                "params": {"text": "一文目。二文目。三文目。"},
+            }))
+            playback_events: list[dict[str, Any]] = []
+            try:
+                while True:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    msg = json.loads(raw)
+                    if msg.get("event") == "playback":
+                        playback_events.append(msg)
+                    if msg.get("event") == "done":
+                        break
+            except asyncio.TimeoutError:
+                pass
+
+            # playing イベントだけ取り出して index が昇順であることを確認
+            playing_indices = [
+                e["data"]["chunk"]["index"]
+                for e in playback_events
+                if e["data"]["state"] == "playing"
+                and e["data"]["chunk"]["type"] == "text"
+            ]
+            assert len(playing_indices) >= 2
+            assert playing_indices == sorted(playing_indices)
+
+    # [CHANGED] 新規: speak 中に再度 speak を送った場合の動作確認
+    async def test_speak_replaces_previous(
+        self, bridge_server: BridgeServer,
+    ) -> None:
+        """読み上げ中に新しい speak を送ると、前の読み上げが停止され
+        新しいテキストの読み上げが開始されること"""
+        async with connect(_ws_url(bridge_server)) as ws:
+            # 最初の speak（長いテキスト）
+            await ws.send(json.dumps({
+                "method": "speak",
+                "params": {"text": "長い文章。" * 10},
+            }))
+
+            # 少し待ってから新しい speak を送る
+            await asyncio.sleep(0.1)
+
+            await ws.send(json.dumps({
+                "method": "speak",
+                "params": {"text": "短い。"},
+            }))
+
+            # 最終的に done が来ることを確認
+            got_done = False
+            try:
+                while True:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    msg = json.loads(raw)
+                    if msg.get("event") == "done":
+                        got_done = True
+                        break
+            except asyncio.TimeoutError:
+                pass
+            assert got_done

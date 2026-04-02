@@ -31,11 +31,14 @@ class BridgeServer:
         self._clients: set[ServerConnection] = set()
         self._orchestrator: Orchestrator | None = None
         self._speak_task: asyncio.Task[None] | None = None
+        self._event_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        self._event_dispatcher_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         self._orchestrator = Orchestrator(config=self._config)
         self._orchestrator.set_event_callback(self._on_playback_event)
         await self._orchestrator.start()
+        self._event_dispatcher_task = asyncio.create_task(self._dispatch_events())
         self._server = await websockets.serve(
             self._handle_client,
             self._host,
@@ -46,6 +49,12 @@ class BridgeServer:
     async def stop(self) -> None:
         if self._orchestrator:
             await self._orchestrator.shutdown()
+        if self._event_dispatcher_task and not self._event_dispatcher_task.done():
+            self._event_queue.put_nowait(None)  # 終了シグナル
+            try:
+                await asyncio.wait_for(self._event_dispatcher_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._event_dispatcher_task.cancel()
         if self._server:
             self._server.close()
             await self._server.wait_closed()
@@ -59,6 +68,24 @@ class BridgeServer:
             pass
         finally:
             await self.stop()
+
+    async def _dispatch_events(self) -> None:
+        """キューからイベントを取り出してブロードキャストするワーカー。
+
+        _on_playback_event は同期コールバックとして呼ばれるため、
+        直接 await self._broadcast() できない。代わりにキューに投入し、
+        この専用タスクが非同期にブロードキャストする。
+        これにより call_soon_threadsafe + ensure_future の
+        fire-and-forget 問題を解消し、送信順序も保証する。
+        """
+        while True:
+            data = await self._event_queue.get()
+            if data is None:
+                break
+            try:
+                await self._broadcast(data)
+            except Exception:
+                logger.exception("Failed to broadcast event")
 
     async def _handle_client(self, ws: ServerConnection) -> None:
         self._clients.add(ws)
@@ -160,6 +187,14 @@ class BridgeServer:
         })
 
     def _on_playback_event(self, event: PlaybackEvent) -> None:
+        """同期コールバック — イベントキューに投入するだけ。
+
+        旧実装では loop.call_soon_threadsafe + asyncio.ensure_future で
+        fire-and-forget していたが、以下の問題があった:
+        - イベントループが忙しい場合に送信が遅延しハイライトがずれる
+        - 送信順序が保証されない
+        キュー + 専用ディスパッチャタスクにより両方を解消する。
+        """
         chunk = event.chunk
         data = {
             "event": "playback",
@@ -176,12 +211,9 @@ class BridgeServer:
             },
         }
         try:
-            loop = asyncio.get_running_loop()
-            loop.call_soon_threadsafe(
-                asyncio.ensure_future, self._broadcast(data),
-            )
-        except RuntimeError:
-            pass
+            self._event_queue.put_nowait(data)
+        except asyncio.QueueFull:
+            logger.warning("Event queue full, dropping playback event for chunk %d", chunk.index)
 
     async def _broadcast(self, data: dict[str, Any]) -> None:
         if not self._clients:

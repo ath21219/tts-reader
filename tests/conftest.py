@@ -123,12 +123,20 @@ class MockAudioBackend:
 
     _MiniaudioBackend と同じインターフェースを持つ。
     play() → wait_until_done() の呼び出しパターンに対応する。
+
+    [CHANGED] デバイス使い回し対応のフォーマットフィールドを追加。
+    本番コードの _MiniaudioBackend と同じプロパティを持たせることで、
+    テスト時にも同一のインターフェースを保証する。
     """
 
     def __init__(self) -> None:
         self.played: list[bytes] = []
         self._done_event = threading.Event()
         self._done_event.set()
+        # [CHANGED] 本番コードとインターフェースを合わせる
+        self._sample_format: Any = None
+        self._nchannels: int = 0
+        self._sample_rate: int = 0
 
     def ensure_init(self) -> None:
         pass
@@ -220,7 +228,7 @@ def sample_html_mixed() -> str:
         "\n"
         "本文テキストです。\n"
         "\n"
-        "![画像](image.png)\n"
+        "![画像](https://example.com/image.png)\n"
         "\n"
         "続きのテキスト。\n"
     )

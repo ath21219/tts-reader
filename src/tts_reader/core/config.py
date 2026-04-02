@@ -25,9 +25,9 @@ class PlaybackConfig:
     """再生関連の設定"""
     buffer_ahead: int = 1           # 先行バッファリングするチャンク数
     default_pause: float = 0.3      # 文間のデフォルトポーズ（秒）
-    heading_pause: float = 0.8      # 見出し前後のポーズ（秒）
-    section_pause: float = 1.2      # セクション区切りのポーズ（秒）
-    paragraph_pause: float = 0.5    # 段落間のポーズ（秒）
+    heading_pause: float = 0.5      # 見出し前後のポーズ（秒）
+    section_pause: float = 0.5      # セクション区切りのポーズ（秒）
+    paragraph_pause: float = 0.3    # 段落間のポーズ（秒）
 
 
 @dataclass

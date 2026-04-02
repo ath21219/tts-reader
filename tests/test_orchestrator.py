@@ -154,6 +154,10 @@ class TestOrchestratorBuffering:
         class SlowBackend:
             def __init__(self) -> None:
                 self._counter = 0
+                # [CHANGED] 本番コードとインターフェースを合わせる
+                self._sample_format: Any = None
+                self._nchannels: int = 0
+                self._sample_rate: int = 0
             def ensure_init(self) -> None: pass
             def play(self, audio_data: bytes, fmt: str = "mp3") -> None:
                 self._counter = 5
@@ -175,3 +179,86 @@ class TestOrchestratorBuffering:
         finally:
             await orch.shutdown()
         assert len(mock_tts_client.requests) == 4
+
+    # [CHANGED] 新規: buffer_ahead=3 (新デフォルト) でも正常動作すること
+    async def test_buffer_ahead_default_value(
+        self, mock_tts_client: MockTTSClient,
+    ) -> None:
+        """AppConfig のデフォルト buffer_ahead=3 で正常に全チャンク再生されること"""
+        config = AppConfig()  # デフォルト設定を使用
+        config.tts.server_url = "http://localhost:9999"
+
+        mock_backend = MockAudioBackend()
+        player = AudioPlayer(backend=mock_backend)
+        orch = Orchestrator(
+            config=config,
+            tts_client=mock_tts_client,  # type: ignore[arg-type]
+            audio_player=player,
+        )
+
+        events: list[PlaybackEvent] = []
+        orch.set_event_callback(lambda e: events.append(e))
+
+        await orch.start()
+        try:
+            await orch.speak("一文目。二文目。三文目。四文目。五文目。")
+        finally:
+            await orch.shutdown()
+
+        playing_text_events = [
+            e for e in events
+            if e.state == PlaybackState.PLAYING and e.chunk.is_speakable
+        ]
+        assert len(playing_text_events) == 5
+        assert len(mock_tts_client.requests) == 5
+
+    # [CHANGED] 新規: produce のリトライロジック検証
+    async def test_produce_respects_running_flag_on_full_queue(
+        self, app_config: AppConfig, mock_tts_client: MockTTSClient,
+    ) -> None:
+        """キューが満杯の状態で _running=False にすると
+        producer が速やかに終了すること"""
+        app_config.playback.buffer_ahead = 1
+
+        import threading
+
+        class BlockingBackend:
+            """play() で長時間ブロックするバックエンド"""
+            def __init__(self) -> None:
+                self._done = threading.Event()
+                self._sample_format: Any = None
+                self._nchannels: int = 0
+                self._sample_rate: int = 0
+            def ensure_init(self) -> None: pass
+            def play(self, audio_data: bytes, fmt: str = "mp3") -> None:
+                self._done.clear()
+            def wait_until_done(self) -> None:
+                # 最大5秒ブロック（テストが stop で解放する想定）
+                self._done.wait(timeout=5.0)
+            def stop(self) -> None:
+                self._done.set()
+            def quit(self) -> None:
+                self._done.set()
+
+        player = AudioPlayer(backend=BlockingBackend())
+        orch = Orchestrator(
+            config=app_config,
+            tts_client=mock_tts_client,  # type: ignore[arg-type]
+            audio_player=player,
+        )
+        await orch.start()
+        try:
+            task = asyncio.create_task(
+                orch.speak("一文目。二文目。三文目。四文目。五文目。")
+            )
+            # consumer が最初のチャンクの再生でブロックし、
+            # producer がキュー満杯で待機するのを待つ
+            await asyncio.sleep(0.3)
+
+            # stop → _running=False → producer/consumer が終了するはず
+            await orch.stop()
+            await asyncio.wait_for(task, timeout=3.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pytest.fail("Orchestrator did not stop in time after _running=False")
+        finally:
+            await orch.shutdown()

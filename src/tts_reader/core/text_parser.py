@@ -226,8 +226,6 @@ class MarkdownTextParser:
             ))
             idx += 1
 
-            # [CHANGED] 見出しテキストも _strip_inline_with_mapping 経由で統一
-            #           （マッピング情報は見出しでは使わないが、ロジックの一本化）
             clean = self._strip_inline(block.heading_body)
             chunks.append(TextChunk(
                 index=idx,
