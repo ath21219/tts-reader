@@ -179,7 +179,7 @@ async function ensurePythonEnv(pythonDir: string): Promise<boolean> {
 
           // uv sync は pyproject.toml + uv.lock から
           // venv作成 → 依存解決 → インストール を一括実行
-          await execAsync(`"${uvCmd}" sync`, { cwd: pythonDir });
+          await execAsync(`"${uvCmd}" sync`, pythonDir);
 
           log("uv sync completed successfully.");
         } else {

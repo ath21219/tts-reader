@@ -69,6 +69,9 @@ class MarkdownTextParser:
     # 見出し
     _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 
+    # 文分割（句点・ピリオド・感嘆符・疑問符の直後で分割）
+    _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。．.!！?？])\s*")
+
     def __init__(self, playback_config: PlaybackConfig | None = None) -> None:
         self._pc = playback_config or PlaybackConfig()
 
@@ -140,27 +143,21 @@ class MarkdownTextParser:
             # 原文上のブロック開始位置（先頭の空白・改行を除いた実テキストの位置）
             block_start = m.start(1)
 
-            # スキップ範囲に含まれるか
+            # スキップ範囲に完全に含まれるか
             if self._is_in_skip_range(block_start, len(block_text), skip_ranges):
                 continue
 
-            # スキップ範囲と部分的に重なる場合もスキップ
-            # （ブロック内にスキップ対象が含まれる場合は残りを処理）
-            clean_text = block_text
-            for s, e in skip_ranges:
-                rel_s = s - block_start
-                rel_e = e - block_start
-                if 0 <= rel_s < len(clean_text):
-                    clean_text = clean_text[:rel_s] + clean_text[rel_e:]
-
-            clean_text = clean_text.strip()
+            # [CHANGED] スキップ範囲と部分的に重なる場合の除去を
+            #           逆順処理に修正し、複数スキップ範囲時のオフセットずれを防止
+            clean_text = self._remove_skip_ranges_from_block(
+                block_text, block_start, skip_ranges,
+            )
             if not clean_text:
                 continue
 
             # 見出し判定
             hm = self._HEADING_RE.match(block_text)
             if hm:
-                # 見出し本体の原文上の位置を計算
                 heading_body = hm.group(2)
                 heading_body_offset = block_start + hm.start(2)
                 blocks.append(_RawBlock(
@@ -178,6 +175,36 @@ class MarkdownTextParser:
                 ))
 
         return blocks
+
+    # [CHANGED] ブロック内スキップ範囲除去を専用メソッドに切り出し＋逆順処理
+    @staticmethod
+    def _remove_skip_ranges_from_block(
+        block_text: str,
+        block_start: int,
+        skip_ranges: list[tuple[int, int]],
+    ) -> str:
+        """ブロック内に部分的に重なるスキップ範囲を除去する。
+
+        逆順に処理することでオフセットのずれを防ぐ。
+        """
+        # ブロック内に該当するスキップ範囲を抽出・クリップ
+        relevant: list[tuple[int, int]] = []
+        block_len = len(block_text)
+        for s, e in skip_ranges:
+            rel_s = s - block_start
+            rel_e = e - block_start
+            # ブロック範囲内にクリップ
+            clipped_s = max(rel_s, 0)
+            clipped_e = min(rel_e, block_len)
+            if 0 <= clipped_s < block_len and clipped_e > clipped_s:
+                relevant.append((clipped_s, clipped_e))
+
+        # 逆順に除去してオフセットのずれを防ぐ
+        result = block_text
+        for rel_s, rel_e in sorted(relevant, reverse=True):
+            result = result[:rel_s] + result[rel_e:]
+
+        return result.strip()
 
     # ----- ブロック → チャンク変換 ------------------------------------------
 
@@ -199,7 +226,8 @@ class MarkdownTextParser:
             ))
             idx += 1
 
-            # 見出しテキスト
+            # [CHANGED] 見出しテキストも _strip_inline_with_mapping 経由で統一
+            #           （マッピング情報は見出しでは使わないが、ロジックの一本化）
             clean = self._strip_inline(block.heading_body)
             chunks.append(TextChunk(
                 index=idx,
@@ -245,16 +273,15 @@ class MarkdownTextParser:
     def _split_into_sentences(
         self, block: _RawBlock,
     ) -> list[tuple[str, int, int]]:
+        """ブロックを文単位に分割し (読み上げテキスト, 原文offset, 原文length) を返す。"""
         raw = block.text
         base_offset = block.offset
 
         # インライン装飾を除去 + 原文位置マッピング
         clean_full, offset_map = self._strip_inline_with_mapping(raw)
 
-        split_re = re.compile(r"(?<=[。．.!！?？])\s*")
-
         boundaries: list[int] = [0]
-        for m in split_re.finditer(clean_full):
+        for m in self._SENTENCE_SPLIT_RE.finditer(clean_full):
             boundaries.append(m.end())
 
         result: list[tuple[str, int, int]] = []
@@ -267,65 +294,79 @@ class MarkdownTextParser:
                 continue
 
             # offset_mapを使って原文上の正確な位置を取得
-            leading_ws = len(clean_full[start:end]) - len(clean_full[start:end].lstrip())
-            actual_start = start + leading_ws
-            actual_end = end - (len(clean_full[start:end]) - len(clean_full[start:end].rstrip()))
-
-            if actual_start < len(offset_map) and actual_end - 1 < len(offset_map):
-                src_offset = base_offset + offset_map[actual_start]
-                src_end = base_offset + offset_map[actual_end - 1] + 1
-                src_length = src_end - src_offset
-            else:
-                src_offset = base_offset + start
-                src_length = len(clean_sentence)
-
+            src_offset, src_length = self._resolve_source_range(
+                clean_full, start, end, offset_map, base_offset,
+            )
             result.append((clean_sentence, src_offset, src_length))
 
         return result
 
-    # ----- ユーティリティ ---------------------------------------------------
+    # [CHANGED] オフセット解決を専用メソッドに切り出し
+    @staticmethod
+    def _resolve_source_range(
+        clean_full: str,
+        start: int,
+        end: int,
+        offset_map: list[int],
+        base_offset: int,
+    ) -> tuple[int, int]:
+        """clean_full[start:end] に対応する原文上の (offset, length) を返す。"""
+        segment = clean_full[start:end]
+        leading_ws = len(segment) - len(segment.lstrip())
+        trailing_ws = len(segment) - len(segment.rstrip())
+        actual_start = start + leading_ws
+        actual_end = end - trailing_ws
 
+        if actual_start < len(offset_map) and actual_end - 1 < len(offset_map):
+            src_offset = base_offset + offset_map[actual_start]
+            src_end = base_offset + offset_map[actual_end - 1] + 1
+            return src_offset, src_end - src_offset
+        else:
+            # フォールバック
+            return base_offset + start, len(segment.strip())
+
+    # ----- インライン装飾の除去 ---------------------------------------------
+
+    # [CHANGED] _strip_inline を _strip_inline_with_mapping のラッパーに変更し、
+    #           装飾除去ロジックを一本化。パターン追加時の変更漏れを防止。
     def _strip_inline(self, text: str) -> str:
-        """インラインMarkdown装飾を除去する"""
-        result = text
-        for pat, repl in self._INLINE_STRIP:
-            result = pat.sub(repl, result)
-        return result.strip()
+        """インラインMarkdown装飾を除去する（マッピング不要時の便利ラッパー）"""
+        clean, _ = self._strip_inline_with_mapping(text)
+        return clean.strip()
 
     def _strip_inline_with_mapping(self, text: str) -> tuple[str, list[int]]:
         """インライン装飾を除去し、cleanテキスト上の各文字位置→原文位置のマッピングを返す。
-        
+
         Returns:
             (clean_text, offset_map) where offset_map[i] は clean_text[i] の原文上の位置
         """
-        # 原文上の各文字に対する「生き残り」フラグと原文位置を追跡
         offset_map: list[int] = list(range(len(text)))
         result = text
-        
-        for pat, repl in self._INLINE_STRIP:
-            new_result = []
-            new_map = []
+
+        for pat, _repl in self._INLINE_STRIP:
+            new_result: list[str] = []
+            new_map: list[int] = []
             last_end = 0
-            
+
             for m in pat.finditer(result):
                 # マッチ前の部分をそのまま転記
                 new_result.append(result[last_end:m.start()])
                 new_map.extend(offset_map[last_end:m.start()])
-                
+
                 # キャプチャグループ（保持する部分）を転記
                 if m.lastindex and m.lastindex >= 1:
                     group_start = m.start(1)
                     group_end = m.end(1)
                     new_result.append(result[group_start:group_end])
                     new_map.extend(offset_map[group_start:group_end])
-                
+
                 last_end = m.end()
-            
+
             # 残りを転記
             new_result.append(result[last_end:])
             new_map.extend(offset_map[last_end:])
-            
+
             result = "".join(new_result)
             offset_map = new_map
-        
+
         return result, offset_map
