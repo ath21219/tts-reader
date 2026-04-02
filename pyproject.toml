@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tts-reader"
+version = "0.1.0"
+description = "Modular TTS reader engine with streaming playback"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.9",
+    "pygame>=2.5",
+    "websockets>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-aiohttp>=1.0",
+]
+
+[project.scripts]
+tts-reader = "tts_reader.adapters.cli_adapter:main"
+tts-bridge = "tts_reader.adapters.vscode_adapter:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,122 @@
+{
+  "name": "tts-reader",
+  "displayName": "TTS Reader",
+  "description": "Read aloud text with local TTS server",
+  "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/tts-reader"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ttsReader.speakDocument",
+        "title": "TTS Reader: Read Document"
+      },
+      {
+        "command": "ttsReader.speakSelection",
+        "title": "TTS Reader: Read Selection"
+      },
+      {
+        "command": "ttsReader.stop",
+        "title": "TTS Reader: Stop Reading"
+      },
+      {
+        "command": "ttsReader.configure",
+        "title": "TTS Reader: Configure"
+      },
+      {
+        "command": "ttsReader.restartServer",
+        "title": "TTS Reader: Restart Server"
+      }
+    ],
+    "configuration": {
+      "title": "TTS Reader",
+      "properties": {
+        "ttsReader.bridgeHost": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Bridge server host"
+        },
+        "ttsReader.bridgePort": {
+          "type": "number",
+          "default": 9120,
+          "description": "Bridge server port"
+        },
+        "ttsReader.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to Python interpreter"
+        },
+        "ttsReader.pythonProjectPath": {
+          "type": "string",
+          "default": ""
+        },
+        "ttsReader.ttsServerUrl": {
+          "type": "string",
+          "default": "http://localhost:7820"
+        },
+        "ttsReader.caption": {
+          "type": "string",
+          "default": "",
+          "description": "Voice direction caption for TTS"
+        },
+        "ttsReader.seed": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "description": "Seed for reproducible TTS generation"
+        },
+        "ttsReader.voice": {
+          "type": "string",
+          "default": "alloy"
+        },
+        "ttsReader.speed": {
+          "type": "number",
+          "default": 1.0
+        },
+        "ttsReader.autoStartServer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start bridge server on activation"
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "ttsReader.speakDocument",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r"
+      },
+      {
+        "command": "ttsReader.stop",
+        "key": "ctrl+shift+s",
+        "mac": "cmd+shift+s"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}

@@ -1,0 +1,11 @@
+.vscode/
+src/
+node_modules/
+!node_modules/ws/
+.gitignore
+tsconfig.json
+**/*.ts
+**/*.map
+python/__pycache__/
+python/.venv/
+python/tests/
