@@ -245,41 +245,41 @@ class MarkdownTextParser:
     def _split_into_sentences(
         self, block: _RawBlock,
     ) -> list[tuple[str, int, int]]:
-        """ブロックを文単位に分割し、(読み上げテキスト, 原文offset, 原文length) を返す。
-
-        原文テキスト上で句読点の位置を検出し、そこで区切る。
-        各文について原文上の正確な開始位置と長さを記録する。
-        """
         raw = block.text
         base_offset = block.offset
 
-        # 原文上で文の境界を見つける
-        # 句点・ピリオド・感嘆符・疑問符の直後で分割
+        # インライン装飾を除去 + 原文位置マッピング
+        clean_full, offset_map = self._strip_inline_with_mapping(raw)
+
         split_re = re.compile(r"(?<=[。．.!！?？])\s*")
 
         boundaries: list[int] = [0]
-        for m in split_re.finditer(raw):
+        for m in split_re.finditer(clean_full):
             boundaries.append(m.end())
 
-        # 各文の範囲を確定
         result: list[tuple[str, int, int]] = []
         for i in range(len(boundaries)):
             start = boundaries[i]
-            end = boundaries[i + 1] if i + 1 < len(boundaries) else len(raw)
+            end = boundaries[i + 1] if i + 1 < len(boundaries) else len(clean_full)
 
-            raw_sentence = raw[start:end].strip()
-            if not raw_sentence:
+            clean_sentence = clean_full[start:end].strip()
+            if not clean_sentence:
                 continue
 
-            # 原文上の正確な位置: strip で先頭の空白を除いた分を補正
-            leading_ws = len(raw[start:end]) - len(raw[start:end].lstrip())
-            src_offset = base_offset + start + leading_ws
-            src_length = len(raw_sentence)
+            # offset_mapを使って原文上の正確な位置を取得
+            leading_ws = len(clean_full[start:end]) - len(clean_full[start:end].lstrip())
+            actual_start = start + leading_ws
+            actual_end = end - (len(clean_full[start:end]) - len(clean_full[start:end].rstrip()))
 
-            # 読み上げ用テキスト（インライン装飾を除去）
-            clean = self._strip_inline(raw_sentence)
-            if clean:
-                result.append((clean, src_offset, src_length))
+            if actual_start < len(offset_map) and actual_end - 1 < len(offset_map):
+                src_offset = base_offset + offset_map[actual_start]
+                src_end = base_offset + offset_map[actual_end - 1] + 1
+                src_length = src_end - src_offset
+            else:
+                src_offset = base_offset + start
+                src_length = len(clean_sentence)
+
+            result.append((clean_sentence, src_offset, src_length))
 
         return result
 
@@ -291,3 +291,41 @@ class MarkdownTextParser:
         for pat, repl in self._INLINE_STRIP:
             result = pat.sub(repl, result)
         return result.strip()
+
+    def _strip_inline_with_mapping(self, text: str) -> tuple[str, list[int]]:
+        """インライン装飾を除去し、cleanテキスト上の各文字位置→原文位置のマッピングを返す。
+        
+        Returns:
+            (clean_text, offset_map) where offset_map[i] は clean_text[i] の原文上の位置
+        """
+        # 原文上の各文字に対する「生き残り」フラグと原文位置を追跡
+        offset_map: list[int] = list(range(len(text)))
+        result = text
+        
+        for pat, repl in self._INLINE_STRIP:
+            new_result = []
+            new_map = []
+            last_end = 0
+            
+            for m in pat.finditer(result):
+                # マッチ前の部分をそのまま転記
+                new_result.append(result[last_end:m.start()])
+                new_map.extend(offset_map[last_end:m.start()])
+                
+                # キャプチャグループ（保持する部分）を転記
+                if m.lastindex and m.lastindex >= 1:
+                    group_start = m.start(1)
+                    group_end = m.end(1)
+                    new_result.append(result[group_start:group_end])
+                    new_map.extend(offset_map[group_start:group_end])
+                
+                last_end = m.end()
+            
+            # 残りを転記
+            new_result.append(result[last_end:])
+            new_map.extend(offset_map[last_end:])
+            
+            result = "".join(new_result)
+            offset_map = new_map
+        
+        return result, offset_map

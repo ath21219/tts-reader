@@ -155,9 +155,9 @@ class TestOrchestratorBuffering:
             def __init__(self) -> None:
                 self._counter = 0
             def ensure_init(self) -> None: pass
-            def play(self, data: bytes, fmt: str = "mp3") -> None:
+            def play(self, audio_data: bytes, fmt: str = "mp3") -> None:
                 self._counter = 5
-            def is_busy(self) -> bool:
+            def wait_until_done(self) -> None:
                 self._counter -= 1
                 return self._counter > 0
             def stop(self) -> None: pass
